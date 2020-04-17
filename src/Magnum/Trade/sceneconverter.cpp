@@ -99,6 +99,42 @@ equivalent to saying `key=true`.
 
 using namespace Magnum;
 
+/* Direct shims for fast deserialization / serialization of blob data. Compared
+   to MagnumImporter / MagnumSceneConverter these don't make the whole file
+   resident in memory, so *much* faster. */
+namespace {
+
+class BlobImporter: public Trade::AbstractImporter {
+    Trade::ImporterFeatures doFeatures() const override { return {}; }
+
+    bool doIsOpened() const override { return _in; }
+    void doClose() override { _in = nullptr; }
+    void doOpenFile(const std::string& filename) override {
+        _in = Utility::Directory::mapRead(filename);
+    }
+
+    UnsignedInt doMeshCount() const override { return 1; }
+    Containers::Optional<Trade::MeshData> doMesh(UnsignedInt, UnsignedInt) override {
+        return Trade::MeshData::deserialize(_in);
+    }
+
+    Containers::Array<const char, Utility::Directory::MapDeleter> _in;
+};
+
+class BlobSceneConverter: public Trade::AbstractSceneConverter {
+    Trade::SceneConverterFeatures doFeatures() const override {
+        return Trade::SceneConverterFeature::ConvertMeshToFile;
+    }
+
+    bool doConvertToFile(const std::string& filename, const Magnum::Trade::MeshData& mesh) override {
+        Containers::Array<char, Utility::Directory::MapDeleter> out = Utility::Directory::mapWrite(filename, mesh.serializedSize());
+        mesh.serializeInto(out);
+        return out.size();
+    }
+};
+
+}
+
 int main(int argc, char** argv) {
     Utility::Arguments args;
     args.addArgument("input").setHelp("input", "input file")
@@ -128,18 +164,26 @@ plugin configuration. If the = character is omitted, it's equivalent to saying
 key=true.)")
         .parse(argc, argv);
 
-    PluginManager::Manager<Trade::AbstractImporter> importerManager{
-        args.value("plugin-dir").empty() ? std::string{} :
-        Utility::Directory::join(args.value("plugin-dir"), Trade::AbstractImporter::pluginSearchPaths()[0])};
+    /* Load importer plugin, or use the blob shim in case the extension
+       matches and we're not overriding the converter to something specific */
+    Containers::Optional<PluginManager::Manager<Trade::AbstractImporter>> importerManager;
+    Containers::Pointer<Trade::AbstractImporter> importer;
+    if(Utility::String::endsWith(args.value("input"), ".blob") && args.value("importer") == "AnySceneImporter") {
+        importer.reset(new BlobImporter);
+        if(!args.value("importer-options").empty())
+            Warning{} << "Importer options" << args.value("importer-options") << "ignored when loading a blob file";
+    } else {
+        importerManager.emplace(
+            args.value("plugin-dir").empty() ? std::string{} :
+            Utility::Directory::join(args.value("plugin-dir"), Trade::AbstractImporter::pluginSearchPaths()[0]));
+        importer = importerManager->loadAndInstantiate(args.value("importer"));
+        if(!importer) {
+            Debug{} << "Available importer plugins:" << Utility::String::join(importerManager->aliasList(), ", ");
+            return 1;
+        }
 
-    Containers::Pointer<Trade::AbstractImporter> importer = importerManager.loadAndInstantiate(args.value("importer"));
-    if(!importer) {
-        Debug{} << "Available importer plugins:" << Utility::String::join(importerManager.aliasList(), ", ");
-        return 1;
+        Trade::Implementation::setOptions(*importer, args.value("importer-options"));
     }
-
-    /* Set options, if passed */
-    Trade::Implementation::setOptions(*importer, args.value("importer-options"));
 
     /* Open the file */
     if(!importer->openFile(args.value("input"))) {
@@ -272,18 +316,26 @@ key=true.)")
         return 4;
     }
 
-    /* Load converter plugin */
-    PluginManager::Manager<Trade::AbstractSceneConverter> converterManager{
-        args.value("plugin-dir").empty() ? std::string{} :
-        Utility::Directory::join(args.value("plugin-dir"), Trade::AbstractSceneConverter::pluginSearchPaths()[0])};
-    Containers::Pointer<Trade::AbstractSceneConverter> converter = converterManager.loadAndInstantiate(args.value("converter"));
-    if(!converter) {
-        Debug{} << "Available converter plugins:" << Utility::String::join(converterManager.aliasList(), ", ");
-        return 2;
-    }
+    /* Load converter plugin, or use the blob shim in case the extension
+       matches and we're not overriding the converter to something specific */
+    Containers::Optional<PluginManager::Manager<Trade::AbstractSceneConverter>> converterManager;
+    Containers::Pointer<Trade::AbstractSceneConverter> converter;
+    if(Utility::String::endsWith(args.value("output"), ".blob") && args.value("converter") == "AnySceneConverter") {
+        converter.reset(new BlobSceneConverter);
+        if(!args.value("converter-options").empty())
+            Warning{} << "Converter options" << args.value("converter-options") << "ignored when writing a blob file";
+    } else {
+        converterManager.emplace(
+            args.value("plugin-dir").empty() ? std::string{} :
+            Utility::Directory::join(args.value("plugin-dir"), Trade::AbstractSceneConverter::pluginSearchPaths()[0]));
+        converter = converterManager->loadAndInstantiate(args.value("converter"));
+        if(!converter) {
+            Debug{} << "Available converter plugins:" << Utility::String::join(converterManager->aliasList(), ", ");
+            return 2;
+        }
 
-    /* Set options, if passed */
-    Trade::Implementation::setOptions(*converter, args.value("converter-options"));
+        Trade::Implementation::setOptions(*converter, args.value("converter-options"));
+    }
 
     /* Save output file */
     if(!converter->convertToFile(args.value("output"), *mesh)) {
