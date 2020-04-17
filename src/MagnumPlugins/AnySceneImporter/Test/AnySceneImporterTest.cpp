@@ -73,6 +73,7 @@ constexpr struct {
     const char* plugin;
 } DetectData[]{
     {"Blender", "suzanne.blend", "BlenderImporter"},
+    {"BLOB", "messy.blob", "MagnumImporter"},
     {"COLLADA", "xml.dae", "ColladaImporter"},
     {"FBX", "autodesk.fbx", "FbxImporter"},
     {"glTF", "khronos.gltf", "GltfImporter"},
