@@ -24,6 +24,7 @@
 */
 
 #include <algorithm>
+#include <chrono>
 #include <Corrade/Containers/Optional.h>
 #include <Corrade/Utility/Arguments.h>
 #include <Corrade/Utility/DebugStl.h>
@@ -65,7 +66,8 @@ information.
 @code{.sh}
 magnum-sceneconverter [-h|--help] [--importer IMPORTER] [--converter CONVERTER]
     [--plugin-dir DIR] [-i|--importer-options key=val,key2=val2,…]
-    [-c|--converter-options key=val,key2=val2,…] [--info] [--] input output
+    [-c|--converter-options key=val,key2=val2,…] [--info] [--profile] [--]
+    input output
 @endcode
 
 Arguments:
@@ -83,6 +85,7 @@ Arguments:
 -   `-c`, `--converter-options key=val,key2=val2,…` --- configuration options
     to pass to the converter
 -   `--info` --- print info about the input file and exit
+-   `--profile` --- measure import time
 
 If `--info` is given, the utility will print information about all meshes
 and images present in the file. **This option is currently mandatory.**
@@ -100,11 +103,23 @@ equivalent to saying `key=true`; configuration subgroups are delimited with
 
 using namespace Magnum;
 
+namespace {
+
+struct Duration {
+    explicit Duration(std::chrono::high_resolution_clock::duration& output): _output{output}, _t{std::chrono::high_resolution_clock::now()} {}
+
+    ~Duration() {
+        _output += std::chrono::high_resolution_clock::now() - _t;
+    }
+
+    private:
+        std::chrono::high_resolution_clock::duration& _output;
+        std::chrono::high_resolution_clock::time_point _t;
+};
+
 /* Direct shims for fast deserialization / serialization of blob data. Compared
    to MagnumImporter / MagnumSceneConverter these don't make the whole file
    resident in memory, so *much* faster. */
-namespace {
-
 class BlobImporter: public Trade::AbstractImporter {
     Trade::ImporterFeatures doFeatures() const override { return {}; }
 
@@ -147,6 +162,7 @@ int main(int argc, char** argv) {
         .addOption('i', "importer-options").setHelp("importer-options", "configuration options to pass to the importer", "key=val,key2=val2,…")
         .addOption('c', "converter-options").setHelp("converter-options", "configuration options to pass to the converter", "key=val,key2=val2,…")
         .addBooleanOption("info").setHelp("info", "print info about the input file and exit")
+        .addBooleanOption("profile").setHelp("profile", "measure import and conversion time")
         .setParseErrorCallback([](const Utility::Arguments& args, Utility::Arguments::ParseError error, const std::string& key) {
             /* If --info is passed, we don't need the output argument */
             if(error == Utility::Arguments::ParseError::MissingArgument &&
@@ -187,10 +203,15 @@ key=true; configuration subgroups are delimited with /.)")
         Trade::Implementation::setOptions(*importer, args.value("importer-options"));
     }
 
+    std::chrono::high_resolution_clock::duration importTime;
+
     /* Open the file */
-    if(!importer->openFile(args.value("input"))) {
-        Error() << "Cannot open file" << args.value("input");
-        return 3;
+    {
+        Duration d{importTime};
+        if(!importer->openFile(args.value("input"))) {
+            Error() << "Cannot open file" << args.value("input");
+            return 3;
+        }
     }
 
     /* Print file info, if requested */
@@ -223,10 +244,13 @@ key=true; configuration subgroups are delimited with /.)")
         Containers::Array<MeshInfo> meshInfos;
         for(UnsignedInt i = 0; i != importer->meshCount(); ++i) {
             for(UnsignedInt j = 0; j != importer->meshLevelCount(i); ++j) {
-                Containers::Optional<Trade::MeshData> mesh = importer->mesh(i, j);
-                if(!mesh) {
-                    error = true;
-                    continue;
+                Containers::Optional<Trade::MeshData> mesh;
+                {
+                    Duration d{importTime};
+                    if(!(mesh = importer->mesh(i, j))) {
+                        error = true;
+                        continue;
+                    }
                 }
 
                 MeshInfo info{};
@@ -309,13 +333,20 @@ key=true; configuration subgroups are delimited with /.)")
             else d << Math::Vector<1, Int>(info.size.x());
         }
 
+        if(args.isSet("profile")) {
+            Debug{} << "Import took" << UnsignedInt(std::chrono::duration_cast<std::chrono::milliseconds>(importTime).count())/1.0e3f << "seconds";
+        }
+
         return error ? 1 : 0;
     }
 
-    Containers::Optional<Trade::MeshData> mesh = importer->mesh(0);
-    if(!importer->meshCount() || !(mesh = importer->mesh(0))) {
-        Error{} << "Cannot import mesh 0";
-        return 4;
+    Containers::Optional<Trade::MeshData> mesh;
+    {
+        Duration d{importTime};
+        if(!importer->meshCount() || !(mesh = importer->mesh(0))) {
+            Error{} << "Cannot import mesh 0";
+            return 4;
+        }
     }
 
     /* Load converter plugin, or use the blob shim in case the extension
@@ -339,9 +370,19 @@ key=true; configuration subgroups are delimited with /.)")
         Trade::Implementation::setOptions(*converter, args.value("converter-options"));
     }
 
+    std::chrono::high_resolution_clock::duration conversionTime;
+
     /* Save output file */
-    if(!converter->convertToFile(args.value("output"), *mesh)) {
-        Error() << "Cannot save file" << args.value("output");
-        return 5;
+    {
+        Duration d{conversionTime};
+        if(!converter->convertToFile(args.value("output"), *mesh)) {
+            Error() << "Cannot save file" << args.value("output");
+            return 5;
+        }
+    }
+
+    if(args.isSet("profile")) {
+        Debug{} << "Import took" << UnsignedInt(std::chrono::duration_cast<std::chrono::milliseconds>(importTime).count())/1.0e3f << "seconds, conversion"
+            << UnsignedInt(std::chrono::duration_cast<std::chrono::milliseconds>(conversionTime).count())/1.0e3f << "seconds";
     }
 }
